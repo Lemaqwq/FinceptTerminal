@@ -51,7 +51,7 @@ version_ge() {
 }
 
 # ── Step 1: System dependencies (build tools only) ──────────
-echo "[1/7] Installing system build tools..."
+echo "[1/8] Installing system build tools..."
 if [ "$PLATFORM" = "linux" ]; then
     if command -v apt-get &>/dev/null; then
         sudo apt-get update -qq
@@ -127,7 +127,7 @@ fi
 ok
 
 # ── Step 2: Verify compiler version ─────────────────────────
-echo "[2/7] Checking C++ compiler..."
+echo "[2/8] Checking C++ compiler..."
 if [ "$PLATFORM" = "linux" ]; then
     command -v g++ &>/dev/null || fail "g++ not found."
     GCC_VER="$(g++ -dumpfullversion -dumpversion 2>/dev/null || g++ --version | head -1 | awk '{print $NF}')"
@@ -142,7 +142,7 @@ fi
 ok
 
 # ── Step 3: Verify CMake version ────────────────────────────
-echo "[3/7] Checking CMake..."
+echo "[3/8] Checking CMake..."
 command -v cmake &>/dev/null || fail "cmake not found."
 CMAKE_VER="$(cmake --version | head -1 | awk '{print $3}')"
 echo "  cmake ${CMAKE_VER}"
@@ -150,7 +150,7 @@ version_ge "$CMAKE_VER" "$CMAKE_MIN" || fail "CMake ${CMAKE_MIN}+ required. Foun
 ok
 
 # ── Step 4: Verify Python version ───────────────────────────
-echo "[4/7] Checking Python..."
+echo "[4/8] Checking Python..."
 PYTHON="$(command -v python3.11 || command -v python3 || true)"
 [ -n "$PYTHON" ] || fail "python3 not found."
 PY_VER="$($PYTHON -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
@@ -163,7 +163,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QT_INSTALL_ROOT="${FINCEPT_QT_ROOT:-$SCRIPT_DIR/.qt}"
 QT_PREFIX="$QT_INSTALL_ROOT/$QT_VERSION/$QT_KIT"
 
-echo "[5/7] Locating Qt ${QT_VERSION}..."
+echo "[5/8] Locating Qt ${QT_VERSION}..."
 if [ -n "${Qt6_DIR:-}" ] && [ -f "$Qt6_DIR/lib/cmake/Qt6/Qt6Config.cmake" ]; then
     QT_PREFIX="$Qt6_DIR"
     info "Using Qt from Qt6_DIR env: $QT_PREFIX"
@@ -208,7 +208,7 @@ APP_DIR="$SCRIPT_DIR/fincept-qt"
 [ -d "$APP_DIR" ] || fail "fincept-qt directory not found. Ensure you cloned the full repository."
 cd "$APP_DIR"
 
-echo "[6/7] Configuring (preset: $PRESET)..."
+echo "[6/8] Configuring (preset: $PRESET)..."
 # Override the preset's default CMAKE_PREFIX_PATH with the one we just set,
 # so the build picks up the aqtinstall location rather than ~/Qt/6.8.3/...
 EXTRA_ARGS=""
@@ -221,8 +221,58 @@ cmake --preset "$PRESET" -DCMAKE_PREFIX_PATH="$QT_PREFIX" $EXTRA_ARGS \
 ok
 
 # ── Step 7: Build ───────────────────────────────────────────
-echo "[7/7] Compiling..."
+echo "[7/8] Compiling..."
 cmake --build --preset "$PRESET" || fail "Build failed. See error above."
+ok
+
+# ── Step 8: macOS bundle deployment ─────────────────────────
+# CMakeLists.txt has a POST_BUILD macdeployqt step, but it is gated by
+# `if(APPLE AND DEPLOY_QT)` and DEPLOY_QT defaults to undefined. On top of
+# that, macdeployqt in Qt 6.8.x occasionally exits after logging
+# "Deploying plugins from..." without actually copying the platform plugin —
+# leaving the bundle without Contents/PlugIns/platforms/libqcocoa.dylib, which
+# makes the app abort at startup (qFatal at qguiapplication.cpp:1327, "no Qt
+# platform plugin could be initialized"). Run macdeployqt here and force-copy
+# the required plugins as a safety net.
+echo "[8/8] Bundling Qt frameworks and plugins..."
+if [ "$PLATFORM" = "macos" ]; then
+    BUNDLE="$APP_DIR/build/$PRESET/FinceptTerminal.app"
+    [ -d "$BUNDLE" ] || fail ".app bundle not found at $BUNDLE"
+
+    MACDEPLOYQT="$QT_PREFIX/bin/macdeployqt"
+    if [ -x "$MACDEPLOYQT" ]; then
+        "$MACDEPLOYQT" "$BUNDLE" -no-strip -always-overwrite >/dev/null 2>&1 \
+            || info "macdeployqt returned non-zero; continuing with manual fallback."
+    else
+        info "macdeployqt not found at $MACDEPLOYQT; relying on manual fallback."
+    fi
+
+    # Manual fallback: ensure the plugins the app actually needs are present,
+    # regardless of whether macdeployqt deployed them.
+    PLUGIN_SRC="$QT_PREFIX/plugins"
+    # platforms/libqcocoa.dylib — required, app crashes without it.
+    if [ -f "$PLUGIN_SRC/platforms/libqcocoa.dylib" ] \
+       && [ ! -f "$BUNDLE/Contents/PlugIns/platforms/libqcocoa.dylib" ]; then
+        info "Copying libqcocoa.dylib (macdeployqt skipped it)."
+        mkdir -p "$BUNDLE/Contents/PlugIns/platforms"
+        cp "$PLUGIN_SRC/platforms/libqcocoa.dylib" "$BUNDLE/Contents/PlugIns/platforms/"
+    fi
+    # sqldrivers/libqsqlite.dylib — app uses QSqlDatabase("QSQLITE").
+    if [ -f "$PLUGIN_SRC/sqldrivers/libqsqlite.dylib" ] \
+       && [ ! -f "$BUNDLE/Contents/PlugIns/sqldrivers/libqsqlite.dylib" ]; then
+        info "Copying libqsqlite.dylib (macdeployqt skipped it)."
+        mkdir -p "$BUNDLE/Contents/PlugIns/sqldrivers"
+        cp "$PLUGIN_SRC/sqldrivers/libqsqlite.dylib" "$BUNDLE/Contents/PlugIns/sqldrivers/"
+    fi
+
+    # Strip extended attributes (codesign rejects bundles with xattrs/resource
+    # forks) then ad-hoc re-sign so macOS will load the freshly added files.
+    xattr -cr "$BUNDLE" 2>/dev/null || true
+    codesign --force --deep --sign - "$BUNDLE" >/dev/null 2>&1 \
+        || info "Ad-hoc codesign failed — Gatekeeper may block the app."
+else
+    echo "  (skipped on $PLATFORM)"
+fi
 ok
 
 # ── Done ────────────────────────────────────────────────────
