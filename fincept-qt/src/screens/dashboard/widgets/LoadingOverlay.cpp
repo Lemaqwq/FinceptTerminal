@@ -32,12 +32,14 @@ QColor with_alpha(const QString& css, int alpha) {
 } // namespace
 
 LoadingOverlay::LoadingOverlay(QWidget* parent) : QWidget(parent) {
-    setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    setAttribute(Qt::WA_NoSystemBackground, true);
-    setAttribute(Qt::WA_TranslucentBackground, true);
-    setFocusPolicy(Qt::NoFocus);
-    setVisible(false);
-
+    // Animations are constructed before any setAttribute/setVisible call.
+    // On Qt 6.8.3 / macOS, setVisible(false) on a freshly-constructed
+    // widget with WA_TranslucentBackground + a parent routes through
+    // QWidgetPrivate::hide_helper() and dispatches a synchronous hideEvent.
+    // Our hideEvent calls stop_shimmer() → shimmer_anim_->stop(); if
+    // shimmer_anim_ is still nullptr at that point the app crashes with
+    // EXC_BAD_ACCESS at +8 (QAbstractAnimation::d_func()).
+    //
     // QGraphicsOpacityEffect was previously used here. Removed: on Qt6 the
     // effect forces an offscreen render pass + composite on every paint even
     // when opacity is 1.0, which adds ~ms per frame per overlay. With ~30
@@ -64,6 +66,12 @@ LoadingOverlay::LoadingOverlay(QWidget* parent) : QWidget(parent) {
             stop_shimmer();
         }
     });
+
+    setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    setAttribute(Qt::WA_NoSystemBackground, true);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setFocusPolicy(Qt::NoFocus);
+    setVisible(false);
 
     connect(&ui::ThemeManager::instance(), &ui::ThemeManager::theme_changed, this,
             [this](const ui::ThemeTokens&) { update(); });
