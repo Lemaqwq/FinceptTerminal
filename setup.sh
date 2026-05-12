@@ -247,23 +247,28 @@ if [ "$PLATFORM" = "macos" ]; then
         info "macdeployqt not found at $MACDEPLOYQT; relying on manual fallback."
     fi
 
-    # Manual fallback: ensure the plugins the app actually needs are present,
-    # regardless of whether macdeployqt deployed them.
+    # Manual fallback: copy plugin categories macdeployqt sometimes skips.
+    # - platforms : required for the app to launch (libqcocoa)
+    # - tls       : required for any HTTPS request (without it, QNetworkAccessManager
+    #               returns "Network error", which breaks sign-up / API calls)
+    # - sqldrivers: app uses QSqlDatabase("QSQLITE")
+    # - networkinformation/imageformats/iconengines/styles: recommended for a
+    #   normal Qt Widgets desktop app
     PLUGIN_SRC="$QT_PREFIX/plugins"
-    # platforms/libqcocoa.dylib — required, app crashes without it.
-    if [ -f "$PLUGIN_SRC/platforms/libqcocoa.dylib" ] \
-       && [ ! -f "$BUNDLE/Contents/PlugIns/platforms/libqcocoa.dylib" ]; then
-        info "Copying libqcocoa.dylib (macdeployqt skipped it)."
-        mkdir -p "$BUNDLE/Contents/PlugIns/platforms"
-        cp "$PLUGIN_SRC/platforms/libqcocoa.dylib" "$BUNDLE/Contents/PlugIns/platforms/"
-    fi
-    # sqldrivers/libqsqlite.dylib — app uses QSqlDatabase("QSQLITE").
-    if [ -f "$PLUGIN_SRC/sqldrivers/libqsqlite.dylib" ] \
-       && [ ! -f "$BUNDLE/Contents/PlugIns/sqldrivers/libqsqlite.dylib" ]; then
-        info "Copying libqsqlite.dylib (macdeployqt skipped it)."
-        mkdir -p "$BUNDLE/Contents/PlugIns/sqldrivers"
-        cp "$PLUGIN_SRC/sqldrivers/libqsqlite.dylib" "$BUNDLE/Contents/PlugIns/sqldrivers/"
-    fi
+    for category in platforms tls sqldrivers networkinformation imageformats iconengines styles; do
+        src_dir="$PLUGIN_SRC/$category"
+        [ -d "$src_dir" ] || continue
+        dst_dir="$BUNDLE/Contents/PlugIns/$category"
+        mkdir -p "$dst_dir"
+        for plugin in "$src_dir"/*.dylib; do
+            [ -f "$plugin" ] || continue
+            name="$(basename "$plugin")"
+            if [ ! -f "$dst_dir/$name" ]; then
+                info "Copying $category/$name (macdeployqt skipped it)."
+                cp "$plugin" "$dst_dir/"
+            fi
+        done
+    done
 
     # Strip extended attributes (codesign rejects bundles with xattrs/resource
     # forks) then ad-hoc re-sign so macOS will load the freshly added files.
